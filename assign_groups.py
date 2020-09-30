@@ -106,7 +106,7 @@ class GroupNameGenerator:
 def create_partners(scores,score_noise=2.0,num_chunks=4):
     """
     Create random partners in a class, with pairing biased such that most-
-    scoreed students are paired with least-scoreed students. This is done by
+    scored students are paired with least-scored students. This is done by
     sorting the class based on the array scores, breaking the class into
     num_chunks chunks, and then making pairs by moving in from outermost to
     innermost chunks to create pairs. If there is an odd number of students, one
@@ -200,6 +200,45 @@ def create_partners(scores,score_noise=2.0,num_chunks=4):
 
     return partners
 
+def with_preassign(preassigned,group_size):
+
+    assignments = preassigned.copy()
+
+    addresses = np.arange(len(preassigned),dtype=np.int)
+
+    assigned_mask = preassigned >= 0
+
+    unique_groups = np.unique(preassigned[assigned_mask])
+    not_assigned_indexes = addresses[np.logical_not(assigned_mask)]
+    np.random.shuffle(not_assigned_indexes)
+    not_assigned_indexes = list(not_assigned_indexes)
+
+    for g in unique_groups:
+        num_in_group = np.sum(preassigned == g)
+
+        while (group_size - num_in_group) > 0 and len(not_assigned_indexes) > 0:
+            to_assign = not_assigned_indexes.pop(0)
+            assignments[to_assign] = g
+            num_in_group += 1
+
+    next_group = np.max(unique_groups) + 1
+    for i in range(0,len(not_assigned_indexes),group_size):
+        indexes = np.array(not_assigned_indexes[i:(i+group_size)])
+        assignments[indexes] = next_group
+        next_group += 1
+
+    # If last is singleton, stick in previous group
+    if len(indexes) == 1:
+        assignments[indexes] = next_group + 1
+
+    groups = []
+    for a in set(assignments):
+        groups.append(list(addresses[assignments == a]))
+
+    return groups
+
+
+
 def simple_break(scores,group_size,score_noise=None):
     """
     Break a vector of scores into groups of group_size.  Tries to assign
@@ -275,13 +314,16 @@ def simple_break(scores,group_size,score_noise=None):
     return final_groups
 
 
-def assign_groups(df,score_column=None,out_column="group_assignment",group_size=2,all_nouns=False):
+def assign_groups(df,score_column=None,preassign_column=None,
+                  out_column="group_assignment",group_size=2,all_nouns=False):
     """
     Assign students in a dataframe into groups.  The group assignment will be
     added as a column in the data frame.
 
     df: data frame containing student scores
     score_column: column with scores.  If None, assign all students the same score
+    preassign_column: column with preassignment.  None entries are treated as
+                      not assigned.
     out_column: column to write group assignment to.
     group_size: group size
     all_nouns: whether or not to use all_nouns (rather than just animals) for
@@ -299,16 +341,29 @@ def assign_groups(df,score_column=None,out_column="group_assignment",group_size=
             err = "input dataframe does not have column '{}'\n".format(score_column)
             raise ValueError(err)
 
+    if preassign_column is None:
+        preassign = [None for _ in range(len(df.iloc[:,0]))]
+    else:
+        try:
+            preassign = df[preassign_column]
+        except KeyError:
+            err = "input dataframe does not have column '{}'\n".format(preassign_column)
+            raise ValueError(err)
+
     # Sanity check on group size
     if group_size < 1 or group_size > len(score) // 2:
         err = "group_size must be between 1 and num_students/2\n"
         raise ValueError(err)
 
     # Assign groups
-    if group_size == 2:
-        groups = create_partners(score)
+    if preassign_column is not None:
+        groups = with_preassign(preassign,group_size)
+
     else:
-        groups = simple_break(score,group_size)
+        if group_size == 2:
+            groups = create_partners(score)
+        else:
+            groups = simple_break(score,group_size)
 
     # Give groups names
     final_groups = [None for _ in range(len(score))]
@@ -357,6 +412,10 @@ def main(argv=None):
                         type=str,default=None,nargs=1,
                         help="column in spreadsheet with scores for group assignments (if not specified, do not weight by score)",
                         action=_NonDefaultAction)
+    parser.add_argument('--preassign-column','-p',dest="preassign_column",
+                        type=str,default=None,nargs=1,
+                        help="column in spreadsheet with pre-assigned groups (assign groups randomly)",
+                        action=_NonDefaultAction)
     parser.add_argument('--out-column','-c',dest="out_column",
                         type=str,default="group_assignment",nargs=1,
                         help="column in spreadsheet where group assignment will be written",
@@ -382,6 +441,12 @@ def main(argv=None):
     else:
         score_column = args.score_column
 
+    # Grab preassign_column
+    if hasattr(args,"preassign_column_nondefault"):
+        preassign_column = args.preassign_column[0]
+    else:
+        preassign_column = args.preassign_column
+
     # Grab out_column
     if hasattr(args,"out_column_nondefault"):
         out_column = args.out_column[0]
@@ -406,7 +471,7 @@ def main(argv=None):
     # Load spreadsheet into a data frame
     if spreadsheet.split(".")[-1] in ["xlsx","xls"]:
         df = pd.read_excel(spreadsheet)
-    elif spreadsheet.split(".")[-1] == ".csv":
+    elif spreadsheet.split(".")[-1] == "csv":
         df = pd.read_csv(spreadsheet)
     else:
         err = "spreadsheet type must be .xlsx or .csv\n"
@@ -415,6 +480,7 @@ def main(argv=None):
     # Create data frame with groups assigned
     final_df = assign_groups(df,
                              score_column=score_column,
+                             preassign_column=preassign_column,
                              out_column=out_column,
                              group_size=group_size,
                              all_nouns=all_nouns)
